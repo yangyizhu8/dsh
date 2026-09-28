@@ -65,7 +65,7 @@ const TOO_LARGE_FOR_CONTEXT = new RegExp(
 /** "Exceeds" wording is safe only when its object is explicitly the model context. */
 const EXCEEDS_MODEL_CONTEXT = new RegExp(
   String.raw`\b(?:input|prompt|request|messages?)\b.{0,40}`
-  + String.raw`\b(?:exceed(?:s|ed)?|overflows?|is\s+larger\s+than)\b.{0,40}`
+  + String.raw`\b(?:exceed(?:s|ed)?|overflows?|is\s+(?:longer|larger)\s+than)\b.{0,40}`
   + String.raw`\b(?:the\s+)?(?:model(?:'s)?\s+)?context(?:\s+(?:length|window))?\b`,
   'i',
 )
