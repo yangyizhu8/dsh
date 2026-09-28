@@ -69,7 +69,7 @@ const SERVICE_ID_ALIASES: ReadonlyMap<string, string> = new Map<string, string>(
 ])
 
 /** Where a resolved window came from, for logging and tests. */
-export type CapacitySource = 'legacy' | 'override' | 'model-table' | 'conservative-default'
+export type CapacitySource = 'legacy' | 'override' | 'model-table' | 'conservative-default' | 'transfer-cap'
 
 /** One routed target's resolved window plus its provenance. */
 export interface CapacityResolution {
@@ -145,12 +145,15 @@ export function resolveEffectiveWindow(
   }
 
   const transferCap = input.providerTransferCap?.[provider]
-  const contextWindow = transferCap === undefined ? resolved : Math.min(resolved, transferCap)
+  // Provenance follows the *binding* leg, not the mere presence of a cap: a relay cap looser than a
+  // conservative default still leaves that default in force, so the missing-verification warning
+  // must survive it.
+  const cappedByTransfer = transferCap !== undefined && transferCap < resolved
   return {
-    contextWindow,
-    source,
+    contextWindow: cappedByTransfer ? transferCap : resolved,
+    source: cappedByTransfer ? 'transfer-cap' : source,
     normalizedModelId,
-    conservative: conservative && transferCap === undefined,
+    conservative: conservative && !cappedByTransfer,
   }
 }
 

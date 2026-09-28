@@ -107,6 +107,25 @@ describe('W1′ · 覆盖与中转上限（R3 语义）', () => {
     })).toBe(400_000)
   })
 
+  it('keeps the conservative provenance when a looser cap leaves the default binding (P2)', () => {
+    // 400,000 > 262,144 ⇒ min() still takes the conservative default, so the unverified-model
+    // warning must not be cleared by the mere presence of a cap.
+    const loose = resolveEffectiveWindow('roomy', 'glm-5.3', {
+      providerTransferCap: { roomy: 400_000 },
+    })
+    expect(loose.contextWindow).toBe(UNKNOWN_MODEL_CONTEXT_WINDOW)
+    expect(loose.source).toBe('conservative-default')
+    expect(loose.conservative).toBe(true)
+
+    // A binding cap owns the provenance and is an operator decision, not a missing verification.
+    const binding = resolveEffectiveWindow('capped', 'deepseek-flash', {
+      providerTransferCap: { capped: 100_000 },
+    })
+    expect(binding.contextWindow).toBe(100_000)
+    expect(binding.source).toBe('transfer-cap')
+    expect(binding.conservative).toBe(false)
+  })
+
   it('ignores overrides and caps under the legacy rollback switch', () => {
     const legacy = resolveEffectiveWindow('capped', 'deepseek-flash', {
       contextWindowSource: 'legacy-1e6',
