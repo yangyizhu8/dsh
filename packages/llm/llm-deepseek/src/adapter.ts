@@ -129,6 +129,12 @@ export interface DeepSeekAdapterOptions {
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 /** Default combined request/response context capacity. */
+/**
+ * Verified true window (tokens) for the DeepSeek families this adapter serves
+ * (`deepseek-flash`, `deepseek-v4-pro`). It is **the deepseek family's window source only**;
+ * other model families must not inherit it — the compaction layer resolves its own
+ * effective window per model (`@deepseek-ai/dsh-compaction-basic/capacity`, W1′).
+ */
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
 /** Default per-request output-token cap. */
 export const DEFAULT_MAX_TOKENS = 256_000

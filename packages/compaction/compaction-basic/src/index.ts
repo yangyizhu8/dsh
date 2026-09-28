@@ -11,6 +11,7 @@ import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compa
 import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, assertNever } from '@deepseek-ai/dsh-llm'
+import { resolveEffectiveWindow } from './capacity.ts'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
@@ -59,6 +60,19 @@ function routedTarget(
   return { provider: config.provider, model: config.model }
 }
 
+/**
+ * Abort state as a plain boolean.
+ *
+ * The condition analyzer narrows `signal.aborted` to `false` at these call sites, but recovery
+ * awaits live work: a real signal can abort in between. Reading through this contract keeps the
+ * intent explicit instead of suppressing the rule at each branch.
+ * @param signal - live cancellation signal observed after an awaited recovery step.
+ * @returns whether the signal had already aborted at read time.
+ */
+function signalAborted(signal: { readonly aborted: boolean }): boolean {
+  return signal.aborted
+}
+
 /** Resolve the conversation target used to select an optional policy override. */
 function conversationTarget(
   agent: Agent,
@@ -73,6 +87,8 @@ function conversationTarget(
 const thresholdRatioSchema = z.number()
 const retainRatioSchema = z.number()
 const retainTokensSchema = z.number().step(1).min(0)
+const contextWindowSchema = z.number().step(1).min(1)
+const stepIncrementMarginTokensSchema = z.number().step(1).min(0)
 const summarizationProviderSchema = z.string()
 const summarizationModelSchema = z.string()
 const maxTokensSchema = z.number().step(1).min(1)
@@ -85,6 +101,7 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   thresholdRatio: thresholdRatioSchema,
   retainRatio: retainRatioSchema,
   retainTokens: retainTokensSchema,
+  contextWindow: contextWindowSchema,
   summarizationProvider: summarizationProviderSchema,
   summarizationModel: summarizationModelSchema,
   maxTokens: maxTokensSchema,
@@ -107,12 +124,17 @@ export class BasicCompactionEngine extends CompactionEngine {
     thresholdRatio: thresholdRatioSchema,
     retainRatio: retainRatioSchema,
     retainTokens: retainTokensSchema,
+    contextWindow: contextWindowSchema,
     summarizationProvider: summarizationProviderSchema,
     summarizationModel: summarizationModelSchema,
     maxTokens: maxTokensSchema,
     compactionRetries: compactionRetriesSchema,
     maxOverflowRetries: maxOverflowRetriesSchema,
     modelPolicies: z.array(modelPolicy),
+    contextWindowSource: z.union(['effective', 'legacy-1e6']),
+    // A string-keyed table has no compact schemastery form; `config.ts` validates it strictly.
+    providerTransferCap: z.any<Readonly<Record<string, number>>>(),
+    stepIncrementMarginTokens: stepIncrementMarginTokensSchema,
     auto: z.boolean(),
   })
 
@@ -197,8 +219,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
-        if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
+        if (!signalAborted(signal) && agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
             `context-overflow compaction failed after durable surface progress: ${message}; `
             + 'retrying from the replacement surface',
@@ -207,15 +228,13 @@ export class BasicCompactionEngine extends CompactionEngine {
           return { kind: 'retry' }
         }
         ctx.logger.warn(
-          // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
-          `context-overflow compaction failed: ${message}; ${signal.aborted
+          `context-overflow compaction failed: ${message}; ${signalAborted(signal)
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
         return next()
       }
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while compaction is awaited.
-      if (signal.aborted
+      if (signalAborted(signal)
         || agent.session.surface.replaceGeneration <= generation) return next()
       if (result !== null) logResult(result, 'context overflow recovery')
       this.overflowRetries.set(agent, retries + 1)
@@ -290,17 +309,24 @@ export class BasicCompactionEngine extends CompactionEngine {
       return this.compactRegion(range.start, range.end, agent, signal)
     }
 
-    const context = (await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)).context
+    const resolution = resolveEffectiveWindow(target.provider, target.model, {
+      contextWindowSource: this.config.contextWindowSource,
+      providerTransferCap: this.config.providerTransferCap,
+      perModelWindow: policy.contextWindow,
+    })
     assertNoActiveCompaction(agent.session, 'automatic pressure compaction')
     const targetKey = `${target.provider}/${target.model}`
-    if (context === undefined) {
-      throw new TargetPressureConfigError(
-        targetKey,
-        `compaction-basic: no context capacity for ${targetKey}; `
-        + 'configure contextWindow on that adapter model',
-      )
+    if (resolution.conservative) {
+      // Conservative capacity is acceptable, never silent: one line per routed target.
+      if (!this.warnedPressureConfigTargets.has(`capacity:${targetKey}`)) {
+        this.warnedPressureConfigTargets.add(`capacity:${targetKey}`)
+        this.ctx.logger.warn(
+          `compaction-basic: contextWindow=default(${resolution.contextWindow}) for ${targetKey} `
+          + `(model "${target.model}" has no verified window); using the conservative default`,
+        )
+      }
     }
-    const spec = resolveCompactSpec(policy, context.contextWindow)
+    const spec = resolveCompactSpec(policy, resolution.contextWindow)
     if (measurement.totalTokens < spec.thresholdTokens) return null
 
     // Once pressure qualifies, land the model-free pass before choosing a

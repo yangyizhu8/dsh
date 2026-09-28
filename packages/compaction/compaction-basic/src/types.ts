@@ -5,6 +5,7 @@
  */
 
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import type { ContextWindowSource } from './capacity.ts'
 
 /** Policy fields shared by the default policy and exact model overrides. */
 export interface CompactionPolicyConfig {
@@ -14,6 +15,11 @@ export interface CompactionPolicyConfig {
   retainRatio?: number
   /** Absolute recent-context budget; mutually exclusive with `retainRatio`. */
   retainTokens?: number
+  /**
+   * Exact-capacity override in tokens for one model. Replaces the normalized true-window
+   * leg and may raise or lower it, so a post-audit correction needs no code change.
+   */
+  contextWindow?: number
   /** Summary provider; set together with `summarizationModel`, or inherit the conversation target. */
   summarizationProvider?: string
   /** Summary model; set together with `summarizationProvider`, or inherit the conversation target. */
@@ -38,6 +44,12 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
 export interface BasicCompactionConfig extends CompactionPolicyConfig {
   /** Exact provider/model overrides; duplicate targets fail plugin load. */
   modelPolicies?: ModelCompactPolicyConfig[]
+  /** Capacity source; `'legacy-1e6'` restores the pre-W1′ virtual window. Defaults to `'effective'`. */
+  contextWindowSource?: ContextWindowSource
+  /** Per-provider relay cap in tokens; a configured cap can only narrow the window. Empty by default. */
+  providerTransferCap?: Readonly<Record<string, number>>
+  /** M3 margin (tokens) reserved for one step's maximum increment. Defaults to `48_000`. */
+  stepIncrementMarginTokens?: number
   /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
 }
@@ -50,6 +62,9 @@ export type ResolvedRetention =
 /** Validated policy fields shared before and after exact-target matching. */
 interface ResolvedPolicyFields {
   readonly thresholdRatio: number
+  /** Exact-capacity override carried from an exact-target policy, when configured. */
+  readonly contextWindow?: number
+  readonly stepIncrementMarginTokens: number
   readonly summarizationProvider: string
   readonly summarizationModel: string
   readonly maxTokens: number
@@ -60,6 +75,8 @@ interface ResolvedPolicyFields {
 /** Validated immutable config whose target-specific defaults remain unresolved. */
 export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & {
   readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
+  readonly contextWindowSource: ContextWindowSource
+  readonly providerTransferCap: Readonly<Record<string, number>>
   readonly auto: boolean
 }
 

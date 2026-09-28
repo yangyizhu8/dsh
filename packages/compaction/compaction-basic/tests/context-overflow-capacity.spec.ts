@@ -2,11 +2,11 @@
  * A2④ · W2′-only 集成级：容量层仍为 legacy-1e6 时的 overflow 救援可容性（W2′ 验收用例）。
  *
  * 等价构造声明（供复核）——
- *   mock adapter 的 resolveModel 报 contextWindow = 1_000_000，而 resolveCompactSpec 取
- *   `thresholdTokens = Math.floor(contextWindow × thresholdRatio)`（config.ts:144）；
- *   本用例取 thresholdRatio: 1 ⇒ thresholdTokens = 1_000_000
- *   ⇒ 对任何体量 < 1e6 的会话，**压力路径恒不触发**——与 `contextWindowSource: 'legacy-1e6'`
- *   （阈值 80 万 / 1e6 级虚高）语义等价 ⇒ 本用例即 A2④ 要求的「W2′-only 最不利组合」。
+ *   引擎以 `contextWindowSource: 'legacy-1e6'` 固定容量腿为 1,000,000（一键回退开关即
+ *   W0 前的虚高行为），且 thresholdRatio: 1 ⇒ `resolveCompactSpec` 取
+ *   `thresholdTokens = min(floor(effectiveWindow × ratio), effectiveWindow − 48_000)`
+ *   = 952,000 > 会话体量 370,054 ⇒ **压力路径恒不触发**——这正是 W2′-only（容量层未修）的
+ *   最不利组合；M1 回填件 §五 亦定稿「A2④ 判定在 contextWindowSource='legacy-1e6' 下进行」。
  *
  * 模拟层的真实性（本用例的核心，不可替换为硬编码错误码）——
  *   400 的 `CONTEXT_WINDOW_EXCEEDED` 码**不经硬编码**，而是由 gateway 原文经
@@ -201,6 +201,8 @@ async function runRecoveryScenario(
     maxTokens: 64,
     compactionRetries: 0,
     maxOverflowRetries: 1,
+    // W2′-only 最不利组合：容量腿固定为虚高的 legacy-1e6（W1′ 的一键回退开关）。
+    contextWindowSource: 'legacy-1e6',
   })
 
   const { agent } = await ctx.agentLoop.createAgent(ctx, {

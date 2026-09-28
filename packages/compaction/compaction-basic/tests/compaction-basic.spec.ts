@@ -49,24 +49,23 @@ class ContextAdapter extends LlmAdapter {
   }
 }
 
-class RoutedContextAdapter extends LlmAdapter {
-  constructor(private readonly windows: Readonly<Record<string, number>>) {
-    super()
-  }
+/**
+ * W1′ moved pressure capacity from the provider adapter's declared window to the resolution
+ * chain (`compaction-basic/src/capacity.ts`). These fixtures were written against a synthetic
+ * adapter window, so the window each fixture context declares is remembered here and pinned
+ * through the exact-target override channel — same numeric semantics, new capacity owner.
+ */
+const fixtureWindows = new WeakMap<Context, number>()
 
-  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const contextWindow = this.windows[provider]
-    return Promise.resolve({
-      provider,
-      id: model,
-      name: model,
-      ...contextWindow === undefined ? {} : { context: { contextWindow } },
-    })
-  }
-
-  override async * stream(): AsyncIterable<StreamChunk> {
-    yield { type: 'finish', reason: { kind: 'stop' } }
-  }
+/**
+ * Exact-target capacity pin for the fixture's synthetic window (W1′ override channel).
+ * @param contextWindow - window the case previously inherited from the adapter.
+ * @returns one exact-target policy pinning the fixture target's capacity.
+ */
+function pinnedCapacity(
+  contextWindow = 1_000,
+): NonNullable<BasicCompactionConfig['modelPolicies']> {
+  return [{ provider: MODEL, model: MODEL, contextWindow }]
 }
 
 function createContext(contextWindow = 1_000): Context {
@@ -74,6 +73,7 @@ function createContext(contextWindow = 1_000): Context {
   void new LlmRuntime(ctx)
   void new TokenMeter(ctx)
   ctx.llm.registerAdapter([MODEL, 'actual', 'unlisted-provider'], new ContextAdapter(contextWindow))
+  fixtureWindows.set(ctx, contextWindow)
   return ctx
 }
 
@@ -272,7 +272,18 @@ function service(
   config: BasicCompactionConfig = { auto: false },
   ctx = createContext(),
 ): TestCompactionEngine {
-  return new TestCompactionEngine(ctx, config)
+  const configured = config.modelPolicies ?? []
+  const alreadyPinned = configured.some(
+    policy => policy.provider === MODEL && policy.model === MODEL,
+  )
+  // Callers that configure their own policy table (or the legacy capacity switch) keep control.
+  if (alreadyPinned || config.contextWindowSource !== undefined) {
+    return new TestCompactionEngine(ctx, config)
+  }
+  return new TestCompactionEngine(ctx, {
+    ...config,
+    modelPolicies: [...configured, ...pinnedCapacity(fixtureWindows.get(ctx) ?? 1_000)],
+  })
 }
 
 async function compactIfNeeded(
@@ -297,6 +308,9 @@ describe('compact configuration and defaults', () => {
       compactionRetries: 1,
       maxOverflowRetries: 1,
       modelPolicies: [],
+      contextWindowSource: 'effective',
+      providerTransferCap: {},
+      stepIncrementMarginTokens: 48_000,
       auto: true,
     })
     expect(Object.isFrozen(resolved)).toBe(true)
@@ -492,41 +506,60 @@ describe('pressure measurement and retention', () => {
     expect(compact.calls).toHaveLength(0)
   })
 
-  it('meters an unlisted model when its provider adapter supplies context metadata', async () => {
+  // W1′ contract: an unlisted model no longer takes capacity from adapter metadata; it takes the
+  // conservative default, and the exact-target override is the channel that pins it deliberately.
+  it('keeps an unlisted model below the conservative default window', async () => {
     const compact = service(compactConfig)
     const session = conversation()
     session.append('request/header', {
       header: { config: { provider: 'unlisted-provider', model: 'unlisted-model' } },
       reason: 'resume',
     })
-    await expect(compactIfNeeded(compact, session))
-      .resolves.not.toBeNull()
+    await expect(compactIfNeeded(compact, session)).resolves.toBeNull()
   })
 
-  it('forwards turn cancellation to proactive model metadata resolution', async () => {
+  it('pins an unlisted model through the exact-target capacity override', async () => {
+    const compact = service({
+      ...compactConfig,
+      modelPolicies: [{
+        provider: 'unlisted-provider',
+        model: 'unlisted-model',
+        contextWindow: 1_000,
+      }],
+    })
+    const session = conversation()
+    session.append('request/header', {
+      header: { config: { provider: 'unlisted-provider', model: 'unlisted-model' } },
+      reason: 'resume',
+    })
+    await expect(compactIfNeeded(compact, session)).resolves.not.toBeNull()
+  })
+
+  it('resolves proactive pressure capacity without provider model metadata', async () => {
     const ctx = createContext()
     const resolveModelInfo = vi.spyOn(ctx.llm, 'resolveModelInfo')
     const compact = service(compactConfig, ctx)
     const session = conversation()
-    const signal = new AbortController().signal
 
-    await expect(compact.compactIfNeeded(agent(session, MODEL), 'pressure', signal))
+    await expect(compact.compactIfNeeded(agent(session, MODEL), 'pressure', SIGNAL))
       .resolves.not.toBeNull()
-    expect(resolveModelInfo).toHaveBeenCalledWith(MODEL, MODEL, signal)
+    expect(resolveModelInfo).not.toHaveBeenCalledWith(MODEL, MODEL, SIGNAL)
   })
 
-  it('re-resolves capacity after a same-model-id provider switch in one session', async () => {
+  it('re-resolves capacity after a same-model-id provider switch through the relay cap', async () => {
     const ctx = new Context()
     void new LlmRuntime(ctx)
     void new TokenMeter(ctx)
-    ctx.llm.registerAdapter(['large', 'small'], new RoutedContextAdapter({
-      large: 10_000,
-      small: 1_000,
-    }))
     const compact = service({
       auto: false,
       thresholdRatio: 0.5,
       retainRatio: 0.1,
+      // One model id behind two relays: only the capped relay narrows below the fixture.
+      providerTransferCap: { small: 1_000 },
+      modelPolicies: [
+        { provider: 'large', model: 'shared-id', contextWindow: 10_000 },
+        { provider: 'small', model: 'shared-id', contextWindow: 10_000 },
+      ],
     }, ctx)
     const session = conversation(4)
     session.append('request/header', {
@@ -542,16 +575,15 @@ describe('pressure measurement and retention', () => {
     await expect(compactIfNeeded(compact, session)).resolves.not.toBeNull()
   })
 
-  it('requires capacity only for proactive pressure, not provider-confirmed overflow', async () => {
+  // W1′ contract: missing capacity degrades to the conservative default with one warning instead
+  // of throwing; provider-confirmed overflow never needed capacity in the first place.
+  it('degrades an unregistered model to the conservative window with one warning', async () => {
     const ctx = new Context()
     void new LlmRuntime(ctx)
     void new TokenMeter(ctx)
     ctx.llm.registerAdapter(['unknown-context'], new ContextAdapter(1_000))
-    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
-      provider,
-      id: model,
-      name: model,
-    }))
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
     const compact = service(compactConfig, ctx)
     const session = conversation(4)
     session.append('request/header', {
@@ -559,10 +591,11 @@ describe('pressure measurement and retention', () => {
       reason: 'resume',
     })
 
-    await expect(compactIfNeeded(compact, session, 'pressure'))
-      .rejects.toThrow(/no context capacity for unknown-context\/model/)
-    await expect(compactIfNeeded(compact, session, 'context-overflow'))
-      .resolves.not.toBeNull()
+    await expect(compactIfNeeded(compact, session, 'pressure')).resolves.toBeNull()
+    await expect(compactIfNeeded(compact, session, 'pressure')).resolves.toBeNull()
+    expect(warnings.filter(line => line.includes('contextWindow=default'))).toHaveLength(1)
+    // Overflow recovery stays capacity-independent.
+    await expect(compactIfNeeded(compact, session, 'context-overflow')).resolves.not.toBeNull()
   })
 
   it('declines forced overflow when the whole surface is one indivisible tool pair', async () => {
@@ -642,6 +675,8 @@ describe('pressure measurement and retention', () => {
       auto: false,
       thresholdRatio: 0.5,
       retainTokens: 180,
+      // The fixture routes to the adapter's `actual` alias; pin its window on the new channel.
+      modelPolicies: [{ provider: 'actual', model: 'actual', contextWindow: 1_000 }],
     }, ctx)
     const session = conversation(4)
     session.append('request/header', {
@@ -793,6 +828,7 @@ describe('optional model-free tool-result pruning', () => {
       auto: false,
       thresholdRatio: 0.5,
       retainTokens: 50,
+      modelPolicies: pinnedCapacity(1_000),
     })
     const session = oversizedToolResult()
 
@@ -810,6 +846,7 @@ describe('optional model-free tool-result pruning', () => {
       auto: false,
       thresholdRatio: 0.5,
       retainTokens: 50,
+      modelPolicies: pinnedCapacity(2_000),
     })
     const session = toolConversation()
 
@@ -825,6 +862,7 @@ describe('optional model-free tool-result pruning', () => {
       auto: false,
       thresholdRatio: 0.5,
       retainTokens: 50,
+      modelPolicies: pinnedCapacity(2_000),
     })
     const session = oversizedToolResult(3_000, true)
 
@@ -1467,6 +1505,7 @@ describe('automatic listener and loader composition', () => {
     const compact = new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 180,
+      modelPolicies: pinnedCapacity(),
     })
     const pressured = conversation(4)
     await preStep(ctx, agent(pressured, 'unconfigured-agent-fallback'))
@@ -1501,6 +1540,7 @@ describe('automatic listener and loader composition', () => {
     const compact = new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 180,
+      modelPolicies: pinnedCapacity(),
     })
     compact.error = 'temporary failure'
     const session = conversation(4)
@@ -1510,7 +1550,9 @@ describe('automatic listener and loader composition', () => {
     expect(session.events.some(event => event.type === 'compaction/summary')).toBe(false)
   })
 
-  it('warns once per routed target when proactive pressure has no context metadata', async () => {
+  // W1′ contract: capacity no longer comes from adapter metadata, so a target with no verified
+  // window degrades to the conservative default and warns once — it never blocks the step.
+  it('warns once per routed target when no verified window exists for it', async () => {
     const ctx = createContext()
     const warnings: string[] = []
     ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
@@ -1529,7 +1571,7 @@ describe('automatic listener and loader composition', () => {
     await preStep(ctx, agent(session, MODEL))
 
     expect(warnings).toEqual([
-      expect.stringContaining(`no context capacity for ${MODEL}/${MODEL}`),
+      expect.stringContaining(`contextWindow=default(262144) for ${MODEL}/${MODEL}`),
     ])
   })
 
@@ -1540,6 +1582,7 @@ describe('automatic listener and loader composition', () => {
     void new TestCompactionEngine(ctx, {
       thresholdRatio: 0.5,
       retainTokens: 500,
+      modelPolicies: pinnedCapacity(),
     })
     const session = conversation(4)
 
@@ -1826,6 +1869,7 @@ describe('automatic listener and loader composition', () => {
       maxOverflowRetries: 0,
       thresholdRatio: 0.5,
       retainTokens: 180,
+      modelPolicies: pinnedCapacity(),
     })
     const session = conversation(4)
     await preStep(ctx, agent(session, MODEL))

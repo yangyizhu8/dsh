@@ -163,12 +163,16 @@ async function harness(toolSteps: number): Promise<{ ctx: Context; compact: Repr
   }))
   // Small window so several tool steps cross the threshold and compaction
   // fires within the runaway turn after enough history can shrink.
+  // W1′: capacity resolves through the model chain instead of the adapter, so this
+  // harness's synthetic 400-token window is pinned explicitly (same numeric semantics
+  // as the StepwiseToolAdapter window it used to inherit).
   const compact = new ReproCompactionEngine(ctx, {
     auto: true,
     thresholdRatio: 0.5,
     retainTokens: 50,
     maxTokens: 8192,
     compactionRetries: 1,
+    modelPolicies: [{ provider: 'mock', model: 'mock', contextWindow: 400 }],
   })
   return { ctx, compact }
 }

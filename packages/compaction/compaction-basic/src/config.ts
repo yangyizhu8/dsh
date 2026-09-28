@@ -6,6 +6,8 @@
 
 import { deepFreeze } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { DEFAULT_STEP_INCREMENT_MARGIN_TOKENS } from './capacity.ts'
+import type { ContextWindowSource } from './capacity.ts'
 import type {
   BasicCompactionConfig,
   CompactionPolicyConfig,
@@ -22,11 +24,15 @@ const DEFAULT_THRESHOLD_RATIO = 0.8
 /** Default verbatim-tail fraction for every routed model. */
 const DEFAULT_RETAIN_RATIO = 0.16
 
+/** Capacity sources accepted by the rollback switch. */
+const CONTEXT_WINDOW_SOURCES: readonly ContextWindowSource[] = ['effective', 'legacy-1e6']
+
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
   'thresholdRatio',
   'retainRatio',
   'retainTokens',
+  'contextWindow',
   'summarizationProvider',
   'summarizationModel',
   'maxTokens',
@@ -38,6 +44,9 @@ const POLICY_CONFIG_KEYS = [
 const BASIC_COMPACT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   ...POLICY_CONFIG_KEYS,
   'modelPolicies',
+  'contextWindowSource',
+  'providerTransferCap',
+  'stepIncrementMarginTokens',
   'auto',
 ])
 
@@ -83,17 +92,54 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     )
   }
 
+  const contextWindowSource = config.contextWindowSource ?? 'effective'
+  if (!CONTEXT_WINDOW_SOURCES.includes(contextWindowSource)) {
+    throw new Error(
+      `BasicCompactionConfig: contextWindowSource (${String(contextWindowSource)}) must be one of `
+      + CONTEXT_WINDOW_SOURCES.join(' | '),
+    )
+  }
+  if (config.stepIncrementMarginTokens !== undefined) {
+    assertNonNegativeInteger(
+      'BasicCompactionConfig.stepIncrementMarginTokens',
+      config.stepIncrementMarginTokens,
+    )
+  }
+
   return deepFreeze({
     thresholdRatio,
     ...retention,
+    stepIncrementMarginTokens: config.stepIncrementMarginTokens
+      ?? DEFAULT_STEP_INCREMENT_MARGIN_TOKENS,
     summarizationProvider: config.summarizationProvider ?? '',
     summarizationModel: config.summarizationModel ?? '',
     maxTokens: config.maxTokens ?? 8192,
     compactionRetries: config.compactionRetries ?? 1,
     maxOverflowRetries: config.maxOverflowRetries ?? 1,
     modelPolicies,
+    contextWindowSource,
+    providerTransferCap: resolveProviderTransferCap(config.providerTransferCap),
     auto: config.auto ?? true,
   })
+}
+
+/** Validate and detach the per-provider relay transfer cap table. */
+function resolveProviderTransferCap(configured: unknown): Readonly<Record<string, number>> {
+  if (configured === undefined) return {}
+  if (!isUnknownRecord(configured)) {
+    throw new Error(
+      'BasicCompactionConfig: providerTransferCap must be an object mapping a provider to tokens',
+    )
+  }
+  const resolved: Record<string, number> = {}
+  for (const [provider, tokens] of Object.entries(configured)) {
+    if (provider.length === 0) {
+      throw new Error('BasicCompactionConfig: providerTransferCap keys must be provider names')
+    }
+    assertPositiveInteger(`BasicCompactionConfig.providerTransferCap.${provider}`, tokens)
+    resolved[provider] = tokens
+  }
+  return resolved
 }
 
 /**
@@ -116,6 +162,8 @@ export function resolveTargetPolicy(
     target: { provider: target.provider, model: target.model },
     thresholdRatio: override?.thresholdRatio ?? config.thresholdRatio,
     ...resolveRetention(override ?? {}, inheritedRetention),
+    contextWindow: override?.contextWindow,
+    stepIncrementMarginTokens: config.stepIncrementMarginTokens,
     summarizationProvider: override?.summarizationProvider ?? config.summarizationProvider,
     summarizationModel: override?.summarizationModel ?? config.summarizationModel,
     maxTokens: override?.maxTokens ?? config.maxTokens,
@@ -125,9 +173,9 @@ export function resolveTargetPolicy(
 }
 
 /**
- * Scale one routed policy into concrete token budgets for its model capacity.
+ * Scale one routed policy into concrete token budgets for its effective model capacity.
  * @param policy - merged policy for the exact routed target.
- * @param contextWindow - positive adapter-owned capacity for that target.
+ * @param contextWindow - effective capacity resolved for that target by W1′ (`capacity.ts`).
  * @returns detached immutable pressure and retention budgets.
  */
 export function resolveCompactSpec(
@@ -141,7 +189,19 @@ export function resolveCompactSpec(
       `BasicCompactionConfig: contextWindow (${contextWindow}) must be a positive integer`,
     )
   }
-  const thresholdTokens = Math.floor(contextWindow * policy.thresholdRatio)
+  const ratioBudget = Math.floor(contextWindow * policy.thresholdRatio)
+  const marginBudget = contextWindow - policy.stepIncrementMarginTokens
+  // The M3 margin reserves room inside the window for one step's largest increment. A window
+  // no larger than the margin cannot reserve it, so the ratio leg governs alone there; every
+  // real window is at least the conservative 262,144 default, where the margin does apply.
+  const thresholdTokens = marginBudget > 0 ? Math.min(ratioBudget, marginBudget) : ratioBudget
+  if (thresholdTokens < 1) {
+    throw new TargetPressureConfigError(
+      targetKey,
+      `BasicCompactionConfig: threshold tokens resolve to ${thresholdTokens} for ${targetKey} `
+      + `(contextWindow ${contextWindow}, thresholdRatio ${policy.thresholdRatio})`,
+    )
+  }
   const retainTokens = policy.retainTokens === undefined
     ? Math.floor(contextWindow * policy.retainRatio)
     : policy.retainTokens
@@ -231,12 +291,14 @@ function validatePolicy(
   const thresholdRatio = config.thresholdRatio
   const retainRatio = config.retainRatio
   const retainTokens = config.retainTokens
+  const contextWindow = config.contextWindow
   const maxTokens = config.maxTokens
   const compactionRetries = config.compactionRetries
   const maxOverflowRetries = config.maxOverflowRetries
   if (thresholdRatio !== undefined) assertRatio(`${name}.thresholdRatio`, thresholdRatio)
   if (retainRatio !== undefined) assertRatio(`${name}.retainRatio`, retainRatio)
   if (retainTokens !== undefined) assertNonNegativeInteger(`${name}.retainTokens`, retainTokens)
+  if (contextWindow !== undefined) assertPositiveInteger(`${name}.contextWindow`, contextWindow)
   if (retainRatio !== undefined && retainTokens !== undefined) {
     throw new Error(`${name}: retainRatio and retainTokens are mutually exclusive`)
   }
