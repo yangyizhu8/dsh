@@ -299,6 +299,18 @@ export class AgentLoop extends Service implements AgentFactory {
   /** Runtime schema for declarative agents. */
   static Config = z.object({
     maxParallelToolCalls: z.number().step(1).min(1).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS),
+    /**
+     * W3 · bound on programmatic inbox injections (`agent.inject`). Omitted ⇒ documented
+     * defaults; `'off'` restores the pre-W3 behaviour exactly. User prompts sent through
+     * `followup`/`steer` stay outside this cap by design.
+     */
+    inboxInjectionCap: z.union([
+      z.const('off'),
+      z.object({
+        perItem: z.number().step(1).min(1),
+        cumulativeBudgetRatio: z.number().min(0).max(1),
+      }),
+    ]),
     agents: z.array(z.object({
       id: z.string().required(),
       sessionId: z.string().min(1),

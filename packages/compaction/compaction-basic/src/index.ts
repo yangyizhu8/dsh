@@ -4,7 +4,7 @@
  * @module @deepseek-ai/dsh-compaction-basic
  */
 
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
@@ -12,8 +12,13 @@ import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, assertNever } from '@deepseek-ai/dsh-llm'
 import { resolveEffectiveWindow } from './capacity.ts'
-import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
-import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { LlmCallConfig, UserMessage } from '@deepseek-ai/dsh-llm'
+import type {
+  Agent,
+  InboxCapacityResolver,
+  InboxCapacitySource,
+  PreStepDecision,
+} from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -110,6 +115,48 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
 })
 
 /**
+ * Publishes the W3 inbox-capacity capability consumed by the agent loop.
+ *
+ * The resolver closes over the engine's single resolved configuration, so the injection gate
+ * and the pressure path share one capacity truth (`contextWindowSource` / `providerTransferCap`
+ * / per-model overrides all apply), and it re-resolves per (provider, model) call so a
+ * mid-session model switch is honored.
+ */
+class InboxCapacityService extends Service implements InboxCapacityResolver {
+  /**
+   * @param ctx - context owning this capability.
+   * @param engine - the compaction engine whose single resolved config owns capacity.
+   * @param price - meter-backed estimator, captured from the engine (which already injects
+   * `tokenMeter`); a directly constructed Service does not resolve `static inject` itself.
+   */
+  constructor(
+    ctx: Context,
+    private readonly engine: BasicCompactionEngine,
+    private readonly price: (message: UserMessage) => number,
+  ) {
+    super(ctx, 'inboxCapacity')
+  }
+
+  resolveContextWindow(provider: string, model: string): {
+    contextWindow: number
+    source: InboxCapacitySource
+  } {
+    const config = this.engine.config
+    const policy = resolveTargetPolicy(config, { provider, model })
+    const resolution = resolveEffectiveWindow(provider, model, {
+      contextWindowSource: config.contextWindowSource,
+      providerTransferCap: config.providerTransferCap,
+      perModelWindow: policy.contextWindow,
+    })
+    return { contextWindow: resolution.contextWindow, source: resolution.source }
+  }
+
+  priceMessage(message: UserMessage): number {
+    return this.price(message)
+  }
+}
+
+/**
  * Dependency-light compaction backend using `ctx.tokenMeter` for pressure,
  * retention, cited source events, and summary-convergence pricing.
  *
@@ -148,6 +195,11 @@ export class BasicCompactionEngine extends CompactionEngine {
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
     this.config = resolveConfig(config)
+    // Additive capability for W3; the first mounted backend owns it and later ones reuse it.
+    if (ctx.get('inboxCapacity') === undefined) {
+      const meter = this.ctx.tokenMeter
+      void new InboxCapacityService(ctx, this, message => meter.estimateMessage(message))
+    }
     if (this.config.auto) this._registerAutomaticCompaction()
   }
 

@@ -34,6 +34,12 @@ import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type { Context } from '@deepseek-ai/cordis'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
+import {
+  checkInboxInjection,
+  inboxInjectionRejectionMessage,
+  resolveInboxInjectionCap,
+} from './inbox-cap.ts'
+import type { InboxInjectionCapConfig, InboxInjectionRejection } from './inbox-cap.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -76,6 +82,8 @@ export class ReactLoopAgent implements Agent {
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
   private readonly runtimeContext: RuntimeContextProjection
+  /** One-shot notice when the cap is configured but no capacity service is mounted. */
+  private injectionCapWarned = false
 
   constructor(
     private loopCtx: Context,
@@ -128,7 +136,60 @@ export class ReactLoopAgent implements Agent {
   }
 
   inject(input: UserMessage): void {
+    const rejection = this.injectionRejection(input)
+    if (rejection !== undefined) {
+      this.notifyInjectionRejected(input, rejection)
+      return
+    }
     this.send(input, 'next-step', false)
+  }
+
+  /**
+   * W3 gate for programmatic injections. Cumulative pressure is derived from the live pending
+   * lists, so claimed/removed/cleared messages release budget and a replayed session recomputes
+   * the same value from its durable splices — no separate counter, no memory-only state.
+   *
+   * The cap is inactive (never silently) when no capacity service is mounted: pricing and the
+   * window both come from that service, so a composition without a compaction backend cannot
+   * enforce a budget at all. That coupling is documented; `'off'` disables the gate explicitly.
+   * @param input - message about to enter the pending list.
+   * @returns the rejection reason, or `undefined` when the message may be queued.
+   */
+  private injectionRejection(input: UserMessage): InboxInjectionRejection | undefined {
+    const raw = (this.ctx.agentLoop?.config as { inboxInjectionCap?: InboxInjectionCapConfig } | undefined)
+      ?.inboxInjectionCap
+    const cap = resolveInboxInjectionCap(raw)
+    if (cap === 'off') return undefined
+    const capacity = this.ctx.get('inboxCapacity')
+    if (capacity === undefined) {
+      if (!this.injectionCapWarned) {
+        this.injectionCapWarned = true
+        this.loopCtx.logger.warn('inbox injection cap inactive: no capacity service')
+      }
+      return undefined
+    }
+    const routed = this.session.requestHeader()?.config
+    const provider = routed?.provider ?? this.options.provider ?? ''
+    const model = routed?.model ?? this.options.model ?? ''
+    const { contextWindow } = capacity.resolveContextWindow(provider, model)
+    return checkInboxInjection({
+      pending: [...this.inbox.nextTurn, ...this.inbox.nextStep],
+      candidate: input,
+      cap,
+      contextWindow,
+      price: message => capacity.priceMessage(message),
+    })
+  }
+
+  /**
+   * Report one refused injection without throwing: `inject()` is called from plugins and
+   * steering paths, so a rejection is a logged, observable no-op.
+   * @param input - refused message.
+   * @param rejection - why it was refused.
+   */
+  private notifyInjectionRejected(input: UserMessage, rejection: InboxInjectionRejection): void {
+    this.loopCtx.logger.warn(inboxInjectionRejectionMessage(rejection))
+    this.dispatch.emit('agent/inbox/discarded', { message: input })
   }
 
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
