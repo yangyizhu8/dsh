@@ -32,7 +32,7 @@ function specFor(
   const window = effectiveWindow(provider, model, {
     contextWindowSource: resolved.contextWindowSource,
     providerTransferCap: resolved.providerTransferCap,
-    perModelWindow: policy.contextWindow,
+    ...policy.contextWindow === undefined ? {} : { perModelWindow: policy.contextWindow },
   })
   const spec = resolveCompactSpec(policy, window)
   return {

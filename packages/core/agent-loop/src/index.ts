@@ -252,7 +252,11 @@ export const AGENT_LOOP_SETTINGS_SCHEMA: z<AgentLoopSettings> = z.object({
 })
 
 /** Agent-loop plugin configuration. */
+import type { InboxInjectionCapConfig } from './inbox-cap.ts'
+
 export interface Config {
+  /** W3 · bound on programmatic inbox injections (`agent.inject`); see `inbox-cap.ts`. */
+  inboxInjectionCap?: InboxInjectionCapConfig
   /**
    * Maximum parallel-safe calls in flight per agent step. `1` is serial;
    * omission defaults to {@link DEFAULT_MAX_PARALLEL_TOOL_CALLS}.

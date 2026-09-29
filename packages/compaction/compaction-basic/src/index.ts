@@ -146,7 +146,7 @@ class InboxCapacityService extends Service implements InboxCapacityResolver {
     const resolution = resolveEffectiveWindow(provider, model, {
       contextWindowSource: config.contextWindowSource,
       providerTransferCap: config.providerTransferCap,
-      perModelWindow: policy.contextWindow,
+      ...policy.contextWindow === undefined ? {} : { perModelWindow: policy.contextWindow },
     })
     return { contextWindow: resolution.contextWindow, source: resolution.source }
   }
@@ -364,7 +364,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     const resolution = resolveEffectiveWindow(target.provider, target.model, {
       contextWindowSource: this.config.contextWindowSource,
       providerTransferCap: this.config.providerTransferCap,
-      perModelWindow: policy.contextWindow,
+      ...policy.contextWindow === undefined ? {} : { perModelWindow: policy.contextWindow },
     })
     assertNoActiveCompaction(agent.session, 'automatic pressure compaction')
     const targetKey = `${target.provider}/${target.model}`

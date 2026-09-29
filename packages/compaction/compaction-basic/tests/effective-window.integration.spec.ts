@@ -37,6 +37,7 @@ import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
 import * as AgentInvariant from '@deepseek-ai/dsh-agent/invariant'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 
@@ -174,7 +175,7 @@ async function runScenario(options: {
   model: string
   physicalCap: number
   repeat: number
-  config?: Parameters<typeof BasicCompactionEngine>[1]['Config'] extends never ? never : Record<string, unknown>
+  config?: BasicCompactionConfig
 }): Promise<ScenarioResult> {
   const ctx = new Context()
   const adapter = new CappedRelayAdapter(
