@@ -147,6 +147,7 @@
   isolate:
     compaction: true
     toolResultPruner: true
+    inboxCapacity: true
   config:
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
