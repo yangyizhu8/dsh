@@ -78,3 +78,27 @@
 2. **落盘必须落盘后复核**：`write` 工具与 python 各一次对 docs/cases/ 写入未生成文件（Test-Path False），
    而工具均报成功。**纪律：关键交付物写入后立即 Test-Path/取字节数复核，并优先落已验证可写目录**。
 3. **推送前类型门预跑**（本节 §三）与 **未推即停**（本节 §五.2）两条，已并入方法论三实例版。
+
+## 八、追加：部署约束与「验证器过≠闸过」四实例版（2026-10-02）
+
+### 8.1 部署约束（W3 之后）
+
+凡挂载 `compaction-basic` 的 preset（**仓内或用户级**）必须在其 `isolate:` 域内声明 `inboxCapacity: true`：
+W3 新增 `agent-loop` 经 `ctx.get('inboxCapacity')` 消费的关系，消费方与提供方须同域，缺项者挂载即抛错。
+
+- 仓内三处：随本交付声明（commit `bfa1ecf8a7`，3 文件 +3 行）；
+- 用户级：`$DSH_HOME/.agent-presets/liangshen/agent.cordis.yml` 于 2026-10-01 就地补 1 行
+  （L254，紧随 `toolResultPruner: true`；备份 `agent.cordis.yml.bak-w3-20261001235050`，可一行还原）——
+  **属仓外本机配置，不入仓**；
+- 自检：`node scripts/check-preset-invariants.mjs` ⇒ 处置前 `27/28 PASS, [FAIL] liangshen`；
+  处置后 **28/28 PASS / exit 0**；
+- 与遗留①（部署路径）直接相关：无论走构建安装或 cherry-pick 到安装线，**都要逐 preset（含用户级）过此项**。
+
+### 8.2 方法论升四实例版（「验证器过≠闸过」）
+
+| 实例 | 形态 | 教训 |
+|---|---|---|
+| CI 矩阵哈希案 | 契约门按矩阵 yaml 哈希比对，哈希落后即 CI 红 | 门禁判据源必须与产物同批更新 |
+| 闸闭环案 | 闸门状态以本地假设代替 `ls-remote` 实测 | 闸门/推送状态须以网络权威真值核验 |
+| 本案验收侧 | 以 vitest 全绿冒充发布就绪；类型门在 pre-push（两半） | **发布就绪判据必须含仓库发布门本地实跑；新增 TS 类型面必须本地 typecheck 前置** |
+| **本案 preset 不变式门（新增）** | 仓门 `check-preset-invariants.mjs` 抓出用户级 preset 缺 `inboxCapacity`（挂载即抛错），单元测试与类型门均不能发现 | **集成面变更须跑仓库全部自检门（含跨到仓外配置根的门），且覆盖面必须包含用户级配置** |

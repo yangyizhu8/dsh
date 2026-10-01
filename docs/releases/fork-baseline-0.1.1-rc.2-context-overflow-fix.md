@@ -64,3 +64,16 @@ context length`，定位为**双防线同时失效**：
    从本 fork 构建安装 / 等待厂商上游合入 / cherry-pick 到安装线；
 2. **版本错位**：fork 基线版本行 `0.1.1-rc.2` 与安装线 `0.1.5+` 不一致，待仓库管理口径统一；
 3. **观察期三指标**（自部署生效日起计时）：长会话压缩频率、注入拒收误伤、新网关 400 措辞变体。
+
+## 七、部署约束（W3 之后，务必先过一遍）
+
+**凡挂载 `compaction-basic` 的 preset 都必须在其 `isolate:` 域内声明 `inboxCapacity: true`。**
+
+原因：W3 让 `agent-loop` 经 `ctx.get('inboxCapacity')` 消费容量服务（与既有 `toolResultPruner` 同族），
+消费方与提供方必须同处一个隔离域；缺该项者**挂载即抛错**（本仓 preset 不变式门 I1 即此规则）。
+
+- 仓内 preset：`apps/cli/config/agent-presets/{code,cordis,standard}` 已随本交付声明（commit `bfa1ecf8a7`）；
+- **用户级 preset（最易漏）**：`$DSH_HOME/.agent-presets/<id>/agent.cordis.yml`——本机 `liangshen`
+  曾缺该项（挂载即抛错），已就地补 1 行并留备份；**部署到其他机器/安装线时，每个用户级 preset 都要过一遍**；
+- 自检命令：`node scripts/check-preset-invariants.mjs`
+  （本仓既有门，默认扫描 `$DSH_HOME/.agent-presets` + 仓内两处 preset 根）⇒ 期望全 PASS（本机实测 28/28）。
