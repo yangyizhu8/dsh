@@ -34,6 +34,12 @@ import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type { Context } from '@deepseek-ai/cordis'
 import { ReactLoopInbox } from './inbox.ts'
+import {
+  checkInboxInjection,
+  estimateInboxMessageTokens,
+  inboxInjectionRejectionMessage,
+  resolveInboxInjectionCap,
+} from './inbox-cap.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
@@ -118,6 +124,8 @@ export class ReactLoopAgent implements Agent {
   private readonly systemPrompt: SystemPromptProjection
   /** Identities fully frozen by this loop; weak references do not retain replaced history. */
   private readonly frozenMessages = new WeakSet<Message>()
+  /** Whether the missing context-window source was already reported for this agent. */
+  private inboxCapacitySourceWarned = false
 
   constructor(
     private loopCtx: Context,
@@ -169,6 +177,35 @@ export class ReactLoopAgent implements Agent {
   }
 
   inject(input: UserMessage): void {
+    const cap = resolveInboxInjectionCap(this.loopCtx.agentLoop.config.inboxInjectionCap.get())
+    if (cap !== undefined) {
+      // The capacity source is the logged request context: `resolveModelInfo`
+      // is async and inject() is synchronous. Before the first request (or
+      // from a route that advertises no window) only the per-item cap holds;
+      // the gate is defensive, so the missing source is reported once instead
+      // of rejecting the injection path.
+      const contextWindow = this.session.requestContext()?.contextWindow
+      if (contextWindow === undefined && !this.inboxCapacitySourceWarned) {
+        this.inboxCapacitySourceWarned = true
+        this.ctx.logger.warn(`agent "${this.id}": no context window in the request context; `
+          + `the inbox cumulative cap is skipped and only the per-item ${cap.perItem}-token cap applies`)
+      }
+      const rejection = checkInboxInjection({
+        pending: [...this.inbox.nextTurn, ...this.inbox.nextStep],
+        candidate: input,
+        cap,
+        contextWindow,
+        price: estimateInboxMessageTokens,
+      })
+      if (rejection !== undefined) {
+        const reason = inboxInjectionRejectionMessage(rejection)
+        this.ctx.logger.warn(`agent "${this.id}": discarded an injected message: ${reason}`)
+        // The shared removal signal; the message never entered a pending
+        // list, so no inbox splice is recorded.
+        this.dispatch.emit('agent/inbox/discarded', { message: input })
+        return
+      }
+    }
     this.send(input, 'next-step', false)
   }
 

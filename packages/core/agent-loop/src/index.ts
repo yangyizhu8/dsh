@@ -33,6 +33,7 @@ import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persis
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { ReactLoopAgent } from './agent.ts'
 import { inboxProjectionDefinition } from './inbox.ts'
+import type { InboxInjectionCapInput } from './inbox-cap.ts'
 import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
 import type {} from './runtime-context.ts'
 
@@ -295,6 +296,11 @@ export interface Config {
    * omission defaults to {@link DEFAULT_MAX_PARALLEL_TOOL_CALLS}.
    */
   maxParallelToolCalls: Volatile<number>
+  /**
+   * Admission limits for `Agent.inject` input: `'off'` disables the gate;
+   * omitted fields keep the defaults declared in `dsh-agent-loop/inbox-cap`.
+   */
+  inboxInjectionCap: Volatile<InboxInjectionCapInput | undefined>
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -331,8 +337,19 @@ export class AgentLoop extends Service implements AgentFactory {
   static inject = ['agents', 'sessions', 'llm', 'tools', 'systemPrompt', 'sessionProjections']
 
   /** Runtime schema for declarative agents. */
-  static Config: z<{ agents?: Config['agents']; maxParallelToolCalls?: number }, Config> = z.object({
+  static Config: z<{
+    agents?: Config['agents']
+    maxParallelToolCalls?: number
+    inboxInjectionCap?: InboxInjectionCapInput
+  }, Config> = z.object({
     maxParallelToolCalls: z.number().step(1).min(1).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS).volatile(),
+    inboxInjectionCap: z.union([
+      z.const('off'),
+      z.object({
+        perItem: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+        cumulativeBudgetRatio: z.number().min(0).max(1),
+      }),
+    ]).volatile(),
     agents: z.array(z.object({
       id: z.string().required(),
       sessionId: z.string().min(1),
@@ -343,7 +360,11 @@ export class AgentLoop extends Service implements AgentFactory {
       cwd: z.string(),
       resumeSessionId: z.string(),
     })).default([]),
-  }) as z<{ agents?: Config['agents']; maxParallelToolCalls?: number }, Config>
+  }) as z<{
+    agents?: Config['agents']
+    maxParallelToolCalls?: number
+    inboxInjectionCap?: InboxInjectionCapInput
+  }, Config>
 
   /** Validated configuration owned by the agent-loop service. */
   readonly config: Config
@@ -357,6 +378,7 @@ export class AgentLoop extends Service implements AgentFactory {
     this.config = {
       agents: applyLauncherIdentities(config.agents, ctx.get(CONFIGURED_AGENT_IDENTITIES_KEY)),
       maxParallelToolCalls: config.maxParallelToolCalls,
+      inboxInjectionCap: config.inboxInjectionCap,
     }
     validateConfiguredAgents(this.config.agents)
     // Register only after every config validation above has passed, so a
