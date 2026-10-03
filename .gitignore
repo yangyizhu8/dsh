@@ -46,3 +46,11 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+
+# UPG 隔离验证遗物（2026-10-03 加）：本 worktree 用于 fork 升格隔离验证，
+# 测试日志/一次性脚本/probe 目录不入仓。
+.upg-*
+__pycache__/
+
+# zcode 桥接按需写下的明文 apiKey 配置（与合并仓同名条目一致的机械兜底）
+.zcode/
