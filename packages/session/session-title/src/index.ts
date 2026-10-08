@@ -259,20 +259,57 @@ function collectSessionTitleMessages(
 
 const titleViewSchema: ZodType<string | null> = zod.string().min(1).nullable()
 
-/** Latest logged title text and its client view. */
+/** Durable ownership record of an accepted title. */
+const sessionTitleSourceSchema = zod.union([
+  zod.object({ kind: zod.literal('fallback') }).strict(),
+  zod.object({
+    kind: zod.literal('provider'),
+    provider: zod.string().min(1).transform(SessionTitleProviderId),
+    model: zod.object({
+      provider: zod.string().min(1),
+      model: zod.string().min(1),
+    }).strict().optional(),
+  }).strict(),
+  zod.object({ kind: zod.literal('user') }).strict(),
+  // The optional `model` member infers `X | undefined`, which the declared
+  // optional property does not admit; the union still validates the same JSON.
+]) as ZodType<SessionTitleSource>
+
+/**
+ * Persisted state of the `title` unit: the latest logged title payload, so a
+ * stored row seeds the fold and {@link SessionTitleService.get} rebuilds the
+ * snapshot without reading the whole log.
+ */
+const titleStateSchema: ZodType<TitleProjection | null> = zod.object({
+  title: zod.string().min(1),
+  messageSeqs: zod.array(
+    zod.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(SessionSeq),
+  ),
+  source: sessionTitleSourceSchema,
+  eventSeq: zod.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(SessionSeq),
+  updatedAt: zod.number(),
+}).strict().nullable()
+
+/** Latest logged title payload, and its client view (the bare title text). */
 export const titleProjectionDefinition = {
   key: 'title',
-  stateVersion: 1,
-  stateSchema: titleViewSchema,
+  stateVersion: 2,
+  stateSchema: titleStateSchema,
   init: () => null,
   apply: (state, event) => (event.type === 'session/title'
-    ? event.data.title
+    ? {
+      title: event.data.title,
+      messageSeqs: event.data.messageSeqs,
+      source: event.data.source,
+      eventSeq: event.seq,
+      updatedAt: event.time,
+    }
     : state),
   wire: {
     viewSchema: titleViewSchema,
-    view: state => state,
+    view: state => state === null ? null : state.title,
   },
-} satisfies ProjectionDefinition<'title', string | null>
+} satisfies ProjectionDefinition<'title', TitleProjection | null>
 
 /**
  * Fold the latest logged title without consulting mutable metadata.
@@ -379,12 +416,16 @@ export class SessionTitleService extends Service {
 
   /**
    * Read the latest folded title from one live or replayed session.
+   *
+   * The `title` projection unit owns the fold, so this read serves the unit's
+   * state at the session cursor: a session's first read folds once over its log
+   * and every later read continues from the watermark instead of re-reading.
    * @param session - session whose log is the title source of truth.
    * @returns latest title snapshot, or `undefined` before eligible input.
    */
   get(session: Session): SessionTitleSnapshot | undefined {
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-    return foldSessionTitle(session.snapshotEvents())
+    const state = this.ctx.sessionProjections.stateOf(session, 'title')
+    return state === null || state === undefined ? undefined : titleSnapshotFromState(state)
   }
 
   /**

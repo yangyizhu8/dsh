@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-08-session-title-projection-snapshot.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-08-session-title-projection-snapshot.md
+/agent-note-serve-the-session-title-snapshot-from-its-projection-unit:
+  en: 720d95f35bf96c08
+  zh: f285f9bfe48c8110
+/agent-note-serve-the-session-title-snapshot-from-its-projection-unit/problem:
+  en: 007c6a6f53a8d2ad
+  zh: 9b8f0b04db7284f3
+/agent-note-serve-the-session-title-snapshot-from-its-projection-unit/decision:
+  en: c59dea08cfd2288f
+  zh: 35441d2de51f0e5b
+/agent-note-serve-the-session-title-snapshot-from-its-projection-unit/alternatives-considered:
+  en: 45548a3b80d511c7
+  zh: 6950315b2cf59e75
+/agent-note-serve-the-session-title-snapshot-from-its-projection-unit/consequences:
+  en: 3a670aa9e3743a49
+  zh: c6d2f21cc55ed172

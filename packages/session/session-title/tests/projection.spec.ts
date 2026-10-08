@@ -33,7 +33,7 @@ describe('title projection unit', () => {
     const { ctx, session } = await harness(true)
     const snapshot = ctx.sessionProjections.snapshot(session)
     expect(snapshot.values.title).toBeNull()
-    expect(ctx.sessionProjections.checkpoint(session).title).toEqual({ ver: 1, seq: -1, val: null })
+    expect(ctx.sessionProjections.checkpoint(session).title).toEqual({ ver: 2, seq: -1, val: null })
   })
 
   it('serves the latest title last-wins and notifies the change feed with the causing seq', async () => {
@@ -54,11 +54,28 @@ describe('title projection unit', () => {
     expect(snapshot.asOfSeq).toBe(session.seq - 1)
   })
 
-  it('reads the version-1 string checkpoint format used by existing title caches', async () => {
+  it('discards a version-1 string checkpoint instead of forward-applying it', async () => {
     const { ctx } = await harness(true)
 
+    // The state format changed with `stateVersion` 2, so a stored v1 string row
+    // is discarded: a fuller read path refolds the log rather than reading a
+    // title out of a value the current fold cannot interpret.
     expect(ctx.sessionProjections.viewCheckpoint({
       title: { ver: 1, seq: SessionSeq(8), val: 'Cached title' },
+    })).toEqual({})
+
+    expect(ctx.sessionProjections.viewCheckpoint({
+      title: {
+        ver: 2,
+        seq: SessionSeq(8),
+        val: {
+          title: 'Cached title',
+          messageSeqs: [],
+          source: { kind: 'user' },
+          eventSeq: 8,
+          updatedAt: 1,
+        },
+      },
     })).toEqual({ title: 'Cached title' })
   })
 
