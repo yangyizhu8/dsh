@@ -11,6 +11,21 @@ export const SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY = 4
 /** Default maximum number of cold prepared-Session observations retained for reuse. */
 export const SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE = 5
 
+/**
+ * Where the logical corpus reads a session's events from.
+ *
+ * `durable` (default) reads the persisted log for every session, including one
+ * open in this process, so a long-running reader never materializes a live
+ * session's whole in-memory log. It falls back to the live log when the
+ * persisted read fails, so an unavailable backend cannot make history that this
+ * process already holds unreadable. `live` restores reading an open session's
+ * in-memory log directly, which is fresher by up to one unflushed write batch.
+ */
+export type SessionQueryCorpusSource = 'durable' | 'live'
+
+/** Default corpus source: read the durable log, falling back to the live log on read failure. */
+export const SESSION_QUERY_DEFAULT_CORPUS_SOURCE: SessionQueryCorpusSource = 'durable'
+
 /** Backend-independent configuration inherited by every session-query implementation. */
 export interface Config {
   /** Maximum accepted raw read context on either side. Defaults to 50. */
@@ -23,6 +38,8 @@ export interface Config {
    * against this bound until released. Defaults to 5.
    */
   preparedSessionCacheSize?: number
+  /** Corpus read source for sessions open in this process. Defaults to `durable`. */
+  corpusSource?: SessionQueryCorpusSource
 }
 
 /** Stable machine-routable failure taxonomy for session reads, traces, and search. */

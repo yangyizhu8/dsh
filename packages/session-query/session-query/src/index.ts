@@ -38,6 +38,7 @@ import type {
   SessionTitleObservationResult,
 } from './types.ts'
 import {
+  SESSION_QUERY_DEFAULT_CORPUS_SOURCE,
   SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY,
   SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE,
   SESSION_QUERY_READ_WINDOW_MAX,
@@ -127,7 +128,16 @@ export abstract class SessionQueryEngine extends Service {
         'SESSION_QUERY_INVALID_CONFIG',
       )
     }
-    this._corpus = new SessionCorpus(ctx, persistedReadConcurrency)
+    // Config arrives from a composition document, so the declared union is a
+    // promise about that document rather than a fact about this value.
+    const configuredCorpusSource: unknown = config.corpusSource ?? SESSION_QUERY_DEFAULT_CORPUS_SOURCE
+    if (configuredCorpusSource !== 'durable' && configuredCorpusSource !== 'live') {
+      throw new SessionQueryError(
+        'session-query: corpusSource must be "durable" or "live"',
+        'SESSION_QUERY_INVALID_CONFIG',
+      )
+    }
+    this._corpus = new SessionCorpus(ctx, persistedReadConcurrency, configuredCorpusSource)
     this._observations = new SessionObservationReader(ctx, preparedSessionCacheSize)
   }
 

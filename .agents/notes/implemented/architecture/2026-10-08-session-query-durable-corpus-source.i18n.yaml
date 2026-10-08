@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-08-session-query-durable-corpus-source.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-08-session-query-durable-corpus-source.md
+/agent-note-read-the-session-query-corpus-from-the-durable-log-by-default:
+  en: 687feb014870e634
+  zh: 3d929f82b3a267d6
+/agent-note-read-the-session-query-corpus-from-the-durable-log-by-default/problem:
+  en: b20d4256cf4b7791
+  zh: 835331a2a6db1184
+/agent-note-read-the-session-query-corpus-from-the-durable-log-by-default/decision:
+  en: ba6fb12684b794c4
+  zh: a0931009a9c18560
+/agent-note-read-the-session-query-corpus-from-the-durable-log-by-default/alternatives-considered:
+  en: 98755062b1d3444c
+  zh: 3abe570db88ad732
+/agent-note-read-the-session-query-corpus-from-the-durable-log-by-default/consequences:
+  en: b9a32142909ae207
+  zh: 19f9e847a5819dbd

@@ -134,11 +134,13 @@ class TracePersistence extends SessionPersistence {
   }
 }
 
-async function queryContext(): Promise<Context> {
+async function queryContext(
+  config: ConstructorParameters<typeof TestSessionQueryEngine>[1] = {},
+): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(TestSessionQueryEngine)
+  await ctx.plugin(TestSessionQueryEngine, config)
   return ctx
 }
 
@@ -373,7 +375,7 @@ describe('session event tracing', () => {
   it('inspects persisted logs once, prefers live logs, and preserves failures and conflicts', async () => {
     const durable = header('shared', 1, { cwd: '/same' })
     TracePersistence.reset([{ meta: durable, events: [appendEvent(0)] }])
-    const ctx = await queryContext()
+    const ctx = await queryContext({ corpusSource: 'live' })
     await ctx.plugin(TracePersistence)
 
     await expect(ctx.sessionQuery.traceEvent({ sessionId: durable.id, seq: SessionSeq(0) }))
@@ -396,7 +398,7 @@ describe('session event tracing', () => {
     expect([TracePersistence.listCalls, TracePersistence.readCalls]).toEqual([1, 1])
 
     TracePersistence.reset([{ meta: durable, events: [appendEvent(0)] }])
-    const failedCtx = await queryContext()
+    const failedCtx = await queryContext({ corpusSource: 'live' })
     await failedCtx.plugin(TracePersistence)
     TracePersistence.listFailure = new Error('list unavailable')
     await expect(failedCtx.sessionQuery.traceEvent({ sessionId: durable.id, seq: SessionSeq(0) }))

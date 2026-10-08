@@ -4,7 +4,7 @@ import type { Context, Fiber } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, SessionHeader, SessionId , SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
 import type { SessionRecord } from './types.ts'
-import { SessionQueryError } from './config.ts'
+import { SessionQueryError, type SessionQueryCorpusSource } from './config.ts'
 import { readColdSessionLog, type ColdSessionLog } from './cold-read.ts'
 import { assertSessionHeadersCompatible } from './sources.ts'
 
@@ -31,7 +31,15 @@ export type LogicalProjectionResult<Value> =
   | { sessionId: SessionId; status: 'fulfilled'; value: Value }
   | { sessionId: SessionId; status: 'rejected'; reason: unknown }
 
-/** Resolves a live-preferred corpus against the persistence service mounted now. */
+/**
+ * Resolves a logical corpus against the persistence service mounted now.
+ *
+ * `corpusSource` selects which log a session open in this process is read from:
+ * `durable` reads the persisted log (so a reader never materializes a live
+ * session's whole in-memory log) and falls back to the live log when that read
+ * is unavailable or fails; `live` reads the in-memory log directly, which is
+ * fresher by up to one unflushed write batch.
+ */
 export class SessionCorpus {
   private _persistence: SessionPersistence | undefined
   private readonly _optionalPersistenceFiber: Fiber
@@ -39,6 +47,7 @@ export class SessionCorpus {
   constructor(
     private readonly _ctx: Context,
     private readonly _persistedReadConcurrency: number,
+    private readonly _corpusSource: SessionQueryCorpusSource,
   ) {
     this._optionalPersistenceFiber = _ctx.inject(['sessionPersistence'], (childCtx: Context) => {
       const service = childCtx.sessionPersistence
@@ -80,43 +89,65 @@ export class SessionCorpus {
   }
 
   /**
-   * Load one logical source, preferring a detached live snapshot.
+   * Load one logical source.
    *
-   * A known live target never consults persistence, so an optional backend's
-   * failure cannot make current in-memory history unreadable.
+   * Under `live` the detached live snapshot wins; under `durable` the persisted
+   * log wins for a session open here, and a session this process holds stays
+   * readable when the persisted read is unavailable or fails.
    * @param sessionId - session to resolve.
    * @param signal - optional cancellation for persisted source resolution.
-   * @returns detached live-preferred header and events.
+   * @returns detached header and events from the selected source.
    */
   async load(sessionId: SessionId, signal?: AbortSignal): Promise<LogicalSession> {
     signal?.throwIfAborted()
     const live = this._ctx.sessions.get(sessionId)
-    if (live !== undefined) {
+    if (live !== undefined && this._corpusSource === 'live') {
       const snapshot = snapshotLive(live)
       signal?.throwIfAborted()
       return snapshot
     }
     const persistence = this._persistence
-    if (persistence === undefined) throw notFound(sessionId)
-    const listed = (await listPersisted(persistence, signal)).find(header => header.id === sessionId)
-    signal?.throwIfAborted()
-    if (listed === undefined) throw notFound(sessionId)
-    const loaded = await inspectPersisted(persistence, sessionId, signal)
-    signal?.throwIfAborted()
-    const attached = this._ctx.sessions.get(sessionId)
-    if (attached !== undefined) {
-      const snapshot = snapshotLive(attached)
+    if (persistence === undefined) {
+      if (live !== undefined) return snapshotLive(live)
+      throw notFound(sessionId)
+    }
+    try {
+      const listed = (await listPersisted(persistence, signal)).find(header => header.id === sessionId)
+      signal?.throwIfAborted()
+      if (listed === undefined) {
+        // Not durable yet: an open session that has not materialized is still readable.
+        const attached = this._ctx.sessions.get(sessionId)
+        if (attached !== undefined) return snapshotLive(attached)
+        throw notFound(sessionId)
+      }
+      const loaded = await inspectPersisted(persistence, sessionId, signal)
+      signal?.throwIfAborted()
+      // `live` keeps the fresher in-memory log for an owner that attached while
+      // the persisted prefix was inspected; `durable` keeps what it just read.
+      if (this._corpusSource === 'live') {
+        const attached = this._ctx.sessions.get(sessionId)
+        if (attached !== undefined) {
+          const snapshot = snapshotLive(attached)
+          signal?.throwIfAborted()
+          return snapshot
+        }
+      }
+      assertSessionHeadersCompatible(loaded.header, listed)
+      const snapshot = {
+        header: structuredClone(loaded.header),
+        inheritedEventCount: loaded.inheritedEventCount,
+        events: loaded.events.map(event => structuredClone(event)),
+      }
       signal?.throwIfAborted()
       return snapshot
+    } catch (error: unknown) {
+      signal?.throwIfAborted()
+      // History this process already holds must not become unreadable because
+      // the backend is absent, failing, or slower than the live log.
+      const attached = this._ctx.sessions.get(sessionId)
+      if (attached !== undefined) return snapshotLive(attached)
+      throw error
     }
-    assertSessionHeadersCompatible(loaded.header, listed)
-    const snapshot = {
-      header: structuredClone(loaded.header),
-      inheritedEventCount: loaded.inheritedEventCount,
-      events: loaded.events.map(event => structuredClone(event)),
-    }
-    signal?.throwIfAborted()
-    return snapshot
   }
 
   /**
@@ -140,7 +171,9 @@ export class SessionCorpus {
     const unresolved: SessionId[] = []
     for (const id of ids) {
       const session = this._ctx.sessions.get(id)
-      if (session === undefined) {
+      if (session === undefined || this._corpusSource === 'durable') {
+        // `durable` routes a known-live id through the persisted read as well, so
+        // one batch never materializes a live session's whole in-memory log.
         unresolved.push(id)
       } else {
         resolved.set(id, projectSource(id, sourceLive(session), project, signal))
@@ -168,24 +201,27 @@ export class SessionCorpus {
       return orderedResults(ids, resolved)
     }
     const persistedById = new Map(persisted.map(header => [header.id, header]))
+    /** Project the in-memory log when this process holds one; the caller decides when. */
+    const projectAttached = (sessionId: SessionId): boolean => {
+      const attached = this._ctx.sessions.get(sessionId)
+      if (attached === undefined) return false
+      resolved.set(sessionId, projectSource(sessionId, sourceLive(attached), project, signal))
+      return true
+    }
     const resolvePersisted = async (sessionId: SessionId): Promise<void> => {
       const listed = persistedById.get(sessionId)
       if (listed === undefined) {
-        const attached = this._ctx.sessions.get(sessionId)
-        resolved.set(sessionId, attached === undefined
-          ? { sessionId, status: 'rejected', reason: notFound(sessionId) }
-          : projectSource(sessionId, sourceLive(attached), project, signal))
+        if (projectAttached(sessionId)) return
+        resolved.set(sessionId, { sessionId, status: 'rejected', reason: notFound(sessionId) })
         return
       }
       try {
         signal?.throwIfAborted()
         const loaded = await inspectPersisted(persistence, sessionId, signal)
         signal?.throwIfAborted()
-        const attached = this._ctx.sessions.get(sessionId)
-        if (attached !== undefined) {
-          resolved.set(sessionId, projectSource(sessionId, sourceLive(attached), project, signal))
-          return
-        }
+        // `live` keeps the fresher in-memory log for an id that became live
+        // during the read; `durable` keeps the persisted source it just read.
+        if (this._corpusSource === 'live' && projectAttached(sessionId)) return
         assertSessionHeadersCompatible(loaded.header, listed)
         resolved.set(sessionId, projectSource(sessionId, {
           header: loaded.header,
@@ -193,6 +229,8 @@ export class SessionCorpus {
         }, project, signal))
       } catch (error: unknown) {
         if (signal?.aborted) signal.throwIfAborted()
+        // A failed persisted read must not hide history this process already holds.
+        if (projectAttached(sessionId)) return
         resolved.set(sessionId, { sessionId, status: 'rejected', reason: error })
       }
     }

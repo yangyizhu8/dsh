@@ -502,7 +502,7 @@ describe('session-query exact reads', () => {
   it('prefers a live owner that attaches while its persisted prefix is inspected', async () => {
     const shared = header('attach-during-inspect', 2)
     TestPersistence.reset([{ meta: shared, events: eventLog('persisted') }])
-    const ctx = await liveContext()
+    const ctx = await liveContext({ corpusSource: 'live' })
     await ctx.plugin(TestPersistence)
     TestPersistence.readEffect = () => {
       ctx.sessions.create(shared.id, {
@@ -546,7 +546,7 @@ describe('session-query exact reads', () => {
         }],
       },
     ])
-    const ctx = await liveContext()
+    const ctx = await liveContext({ corpusSource: 'live' })
     await ctx.plugin(SessionTitleService, TITLE_SERVICE_CONFIG)
     const shared = ctx.sessions.create(sharedHeader.id, { meta: { createdAt: 3 } })
     shared.append('session/title', {
@@ -809,7 +809,7 @@ describe('session-query exact reads', () => {
       { meta: failed, events: [] },
       { meta: malformed, events: [malformedTitle] },
     ])
-    const ctx = await liveContext()
+    const ctx = await liveContext({ corpusSource: 'live' })
     await ctx.plugin(SessionTitleService, TITLE_SERVICE_CONFIG)
     await ctx.plugin(TestPersistence)
     TestPersistence.readOverride = (id) => {
@@ -851,7 +851,7 @@ describe('session-query exact reads', () => {
   })
 
   it('preserves live batch results across missing persistence, listing failure, and late attachment', async () => {
-    const liveOnly = await liveContext()
+    const liveOnly = await liveContext({ corpusSource: 'live' })
     const live = liveOnly.sessions.create(SessionId('batch-title-live'))
     const missing = SessionId('batch-title-no-persistence')
 
@@ -870,7 +870,7 @@ describe('session-query exact reads', () => {
     const persisted = header('batch-title-persisted', 1)
     const late = header('batch-title-late', 2)
     TestPersistence.reset([{ meta: persisted, events: [] }])
-    const mixed = await liveContext()
+    const mixed = await liveContext({ corpusSource: 'live' })
     const mixedLive = mixed.sessions.create(SessionId('batch-title-mixed-live'))
     await mixed.plugin(TestPersistence)
     TestPersistence.afterList = () => {
@@ -890,7 +890,7 @@ describe('session-query exact reads', () => {
 
     TestPersistence.reset()
     TestPersistence.listFailure = new Error('title listing failed')
-    const failedList = await liveContext()
+    const failedList = await liveContext({ corpusSource: 'live' })
     const survivingLive = failedList.sessions.create(SessionId('batch-title-list-live'))
     await failedList.plugin(TestPersistence)
 
@@ -1106,7 +1106,7 @@ describe('session-query exact reads', () => {
       { meta: shared, events: eventLog('persisted') },
       { meta: durable, events: eventLog('durable') },
     ])
-    const ctx = await liveContext()
+    const ctx = await liveContext({ corpusSource: 'live' })
     const live = ctx.sessions.create(shared.id, { meta: { createdAt: 3, cwd: '/same' } })
     live.append('turn/start', { turn: 1 })
     live.append(
@@ -1166,10 +1166,76 @@ describe('session-query exact reads', () => {
       .resolves.toMatchObject({ session: { id: live.id }, target: { seq: SessionSeq(1) } })
     await expect(ctx.sessionQuery.readEvent({ sessionId: live.id, seq: SessionSeq(1) }, signal))
       .resolves.toMatchObject({ target: { seq: SessionSeq(1) } })
-    expect(TestPersistence.listSignals).toEqual([])
+    // The default corpus source lists persistence first, so a known live id now
+    // consults it; the reads above still resolve because every failure falls back
+    // to the live log this process holds. An id with no durable artifact stops at
+    // the listing and never inspects one.
+    expect(TestPersistence.listSignals.length).toBeGreaterThan(0)
     expect(TestPersistence.readSignals).toEqual([])
     await expect(ctx.sessionQuery.listSessions()).rejects.toThrow(expectCode('SESSION_QUERY_PERSISTENCE_FAILED'))
     await expect(ctx.sessionQuery.listEvents(SessionId('durable'))).rejects.toThrow(expectCode('SESSION_QUERY_PERSISTENCE_FAILED'))
+  })
+
+  it('keeps a live source independent from persistence under corpusSource live', async () => {
+    TestPersistence.reset()
+    const ctx = await liveContext({ corpusSource: 'live' })
+    const live = ctx.sessions.create(SessionId('live-switch'))
+    live.append('turn/start', { turn: 1 })
+    await ctx.plugin(TestPersistence)
+    TestPersistence.listFailure = new Error('list unavailable')
+    TestPersistence.readFailure = new Error('inspect unavailable')
+
+    await expect(ctx.sessionQuery.listEvents(live.id)).resolves.toHaveLength(1)
+    expect(TestPersistence.listSignals).toEqual([])
+    expect(TestPersistence.readSignals).toEqual([])
+  })
+
+  it('selects the durable log by default and the live log under corpusSource live', async () => {
+    const shared = header('source-preference', 3, { cwd: '/same' })
+    TestPersistence.reset([{ meta: shared, events: eventLog('durable-body') }])
+
+    const durableDefault = await liveContext()
+    const liveUnderDurable = durableDefault.sessions.create(shared.id, { meta: { createdAt: 3, cwd: '/same' } })
+    liveUnderDurable.append('turn/start', { turn: 1 })
+    await durableDefault.plugin(TestPersistence)
+    const durablyRead = await durableDefault.sessionQuery.readSession(shared.id)
+    expect(JSON.stringify(durablyRead.events)).toContain('durable-body')
+    expect(TestPersistence.readSignals.length).toBeGreaterThan(0)
+
+    // The recorder arrays are static, so clear the durable half before asserting
+    // that a live source never consults persistence.
+    TestPersistence.reset()
+    const liveSelected = await liveContext({ corpusSource: 'live' })
+    const liveUnderLive = liveSelected.sessions.create(shared.id, { meta: { createdAt: 3, cwd: '/same' } })
+    liveUnderLive.append('turn/start', { turn: 1 })
+    await liveSelected.plugin(TestPersistence)
+    const liveRead = await liveSelected.sessionQuery.readSession(shared.id)
+    expect(JSON.stringify(liveRead.events)).not.toContain('durable-body')
+    expect(TestPersistence.readSignals).toEqual([])
+  })
+
+  it('rejects an unknown corpus source at construction', () => {
+    // The declared union is the contract: a value outside it is a configuration error.
+    expect(() => new TestSessionQueryEngine(new Context(), {
+      corpusSource: 'memory' as unknown as 'durable',
+    })).toThrow(expectCode('SESSION_QUERY_INVALID_CONFIG'))
+  })
+
+  it('falls back to the live log when a batch persisted read fails', async () => {
+    const shared = header('batch-fallback-live', 3, { cwd: '/same' })
+    TestPersistence.reset([{ meta: shared, events: eventLog('durable-body') }])
+    const ctx = await liveContext()
+    const live = ctx.sessions.create(shared.id, { meta: { createdAt: 3, cwd: '/same' } })
+    live.append('turn/start', { turn: 1 })
+    await ctx.plugin(TestPersistence)
+    TestPersistence.readFailure = new Error('inspect unavailable')
+
+    // The batch path reads the durable log by default, so a failed read still has
+    // to answer from the history this process holds.
+    await expect(ctx.sessionQuery.readTitleSnapshots([shared.id])).resolves.toMatchObject([
+      { sessionId: shared.id, status: 'fulfilled' },
+    ])
+    expect(TestPersistence.readSignals.length).toBeGreaterThan(0)
   })
 
   it('wraps persisted corruption as SESSION_QUERY_CORRUPT_SESSION with its cause preserved', async () => {
