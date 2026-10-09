@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-09-session-controller-prompt-dedup-scan.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-09-session-controller-prompt-dedup-scan.md
+/agent-note-deduplicate-a-retried-prompt-request-without-copying-the-log:
+  en: e3e2c768584856ac
+  zh: 8917486c84e16fd2
+/agent-note-deduplicate-a-retried-prompt-request-without-copying-the-log/problem:
+  en: 388be151d1ed1ccc
+  zh: a95c53a0e3584ba5
+/agent-note-deduplicate-a-retried-prompt-request-without-copying-the-log/decision:
+  en: db7350a947343927
+  zh: 8f41fe1332547eaa
+/agent-note-deduplicate-a-retried-prompt-request-without-copying-the-log/alternatives-considered:
+  en: 57abdcd5cd6d7ae5
+  zh: 43a3e815a46a5dd0
+/agent-note-deduplicate-a-retried-prompt-request-without-copying-the-log/consequences:
+  en: 7998422df578d012
+  zh: c59cf323431a058d

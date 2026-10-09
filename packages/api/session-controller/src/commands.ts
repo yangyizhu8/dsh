@@ -17,7 +17,7 @@ import {
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
 import { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionHeader, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { SessionTitleInvalidError } from '@deepseek-ai/dsh-session-title'
 import { canonicalClientTimeZone } from '@deepseek-ai/dsh-util-time'
@@ -605,12 +605,29 @@ function hasPromptRequest(agent: Agent, requestId: SessionRequestId): boolean {
     return source.kind === 'user' && 'rpcId' in source && source.rpcId === requestId
   }
   if (agent.inbox.nextTurn.some(matches) || agent.inbox.nextStep.some(matches)) return true
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-  return agent.session.snapshotEvents().some((event) => {
-    if (event.type !== 'user/message') return false
+  return recordsPromptRequest(agent.session, requestId)
+}
+
+/**
+ * Whether the log already records a user message carrying this RPC request id.
+ *
+ * Scans newest-first through point reads: a retried request matches near the tail,
+ * so the scan stops almost immediately, and it allocates nothing — the whole-log
+ * snapshot this replaces copied every event before the search even started.
+ * @param session - live session whose log is searched.
+ * @param requestId - RPC request id to look for.
+ * @returns true when one recorded user message carries the id.
+ */
+function recordsPromptRequest(session: Session, requestId: SessionRequestId): boolean {
+  for (let index = session.seq - 1; index >= 0; index -= 1) {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    const event = session.eventAt(SessionSeq(index))
+    /* v8 ignore next -- the loop indexes only seqs the log already holds */
+    if (event === undefined || event.type !== 'user/message') continue
     const source = event.data.source
-    return source.kind === 'user' && 'rpcId' in source && source.rpcId === requestId
-  })
+    if (source.kind === 'user' && 'rpcId' in source && source.rpcId === requestId) return true
+  }
+  return false
 }
 function imageBlockIn(
   content: unknown,
