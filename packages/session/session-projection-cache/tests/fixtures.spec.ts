@@ -20,7 +20,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
-import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
+import type { SessionTitleSnapshot, SessionTitleSource } from '@deepseek-ai/dsh-session-title'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
@@ -38,7 +39,7 @@ import { checkpointRow, projectionCacheDomainSpec } from '../src/spec.ts'
 // compile face sees both).
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
-    title: string | null
+    title: SessionTitleSnapshot | null
   }
   interface SessionProjectionMap {
     title: string | null
@@ -55,17 +56,33 @@ declare module '@deepseek-ai/dsh-session/types' {
   }
 }
 
-// Mirrors the shipped title unit's storage face: stateVersion 1, bare-string
-// state (the fixture rows carry exactly this shape in every archived
-// version), folding a test event so the rewrite path has fresh data.
+// Mirrors the shipped title unit's storage face: stateVersion 2, snapshot
+// state, folding a test event so the rewrite path has fresh data.
+// (Archived fixture rows still carry the legacy ver:1 bare-string shape —
+//  runtime tolerance of legacy rows is an observation-period verification item.)
+const titleSnapshotSchema = z.object({
+  title: z.string(),
+  messageSeqs: z.array(z.number().int().nonnegative().transform(SessionSeq)),
+  source: z.any() as z.ZodType<SessionTitleSource>,
+  eventSeq: z.number().int().nonnegative().transform(SessionSeq),
+  updatedAt: z.number(),
+}).strict()
 const titleUnit = {
   key: 'title',
-  stateSchema: z.string().nullable(),
+  stateSchema: titleSnapshotSchema.nullable(),
   init: () => null,
-  apply: (state, event) => (event.type === 'fixtures-test/set-title' ? event.data.title : state),
-  wire: { viewSchema: z.string().nullable(), view: state => state },
-  stateVersion: 1,
-} satisfies ProjectionDefinition<'title', string | null>
+  apply: (state, event) => (event.type === 'fixtures-test/set-title'
+    ? {
+      title: event.data.title,
+      messageSeqs: [],
+      source: { kind: 'user' },
+      eventSeq: event.seq,
+      updatedAt: event.time,
+    }
+    : state),
+  wire: { viewSchema: z.string().nullable(), view: state => state === null ? null : state.title },
+  stateVersion: 2,
+} satisfies ProjectionDefinition<'title', SessionTitleSnapshot | null>
 
 const FIXTURES = fileURLToPath(new URL('./fixtures/', import.meta.url))
 
@@ -141,7 +158,7 @@ async function assertRewrite(ctx: Context, root: string, id: SessionId): Promise
       isSeeded: false,
       inheritedEventCount: 0,
     })
-    expect(doc.record.rows['title']?.val).toBe('重写标题')
+    expect(doc.record.rows['title']?.val).toMatchObject({ title: '重写标题' })
   }, { timeout: 5_000 })
 }
 

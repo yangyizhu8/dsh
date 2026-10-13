@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
+import type { SessionTitleSnapshot, SessionTitleSource } from '@deepseek-ai/dsh-session-title'
 import SessionStore, {
   SESSION_FORMAT_VERSION,
   Session,
@@ -45,7 +46,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'cache-test/count': number
     'cache-test/secret': string
     'cache-test/marks3': MarksState
-    title: string | null
+    title: SessionTitleSnapshot | null
   }
   interface SessionProjectionMap {
     'cache-test/marks': { marks: string[] }
@@ -110,15 +111,22 @@ const secondaryMarksUnit = {
   stateVersion: 1,
 } satisfies ProjectionDefinition<'cache-test/secondary-marks', MarksState>
 
-/** Mirrors the shipped title unit's storage face (stateVersion 1, bare-string state). */
+/** Mirrors the shipped title unit's storage face (stateVersion 2, snapshot state). */
+const titleSnapshotSchema = z.object({
+  title: z.string(),
+  messageSeqs: z.array(z.number().int().nonnegative().transform(SessionSeq)),
+  source: z.any() as z.ZodType<SessionTitleSource>,
+  eventSeq: z.number().int().nonnegative().transform(SessionSeq),
+  updatedAt: z.number(),
+}).strict()
 const titleUnit = {
   key: 'title',
-  stateSchema: z.string().nullable(),
+  stateSchema: titleSnapshotSchema.nullable(),
   init: () => null,
   apply: state => state,
-  wire: { viewSchema: z.string().nullable(), view: state => state },
-  stateVersion: 1,
-} satisfies ProjectionDefinition<'title', string | null>
+  wire: { viewSchema: z.string().nullable(), view: state => state === null ? null : state.title },
+  stateVersion: 2,
+} satisfies ProjectionDefinition<'title', SessionTitleSnapshot | null>
 
 /** One session's record document on the per-record medium. */
 const recordPath = (root: string, id: Session['id']): string =>
@@ -447,7 +455,7 @@ describe('SessionProjectionCache listing read', () => {
       id,
       {
         'cache-test/marks': { ver: 1, seq: SessionSeq(3), val: { marks: ['fork'] } },
-        title: { ver: 1, seq: SessionSeq(3), val: 'forked title' },
+        title: { ver: 2, seq: SessionSeq(3), val: { title: 'forked title', messageSeqs: [], source: { kind: 'user' }, eventSeq: SessionSeq(3), updatedAt: 0 } },
       },
       {
         formatVersion: SESSION_FORMAT_VERSION - 1,
